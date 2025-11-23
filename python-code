@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+import cv2
+import time
+import threading
+import os
+from ultralytics import YOLO
+from playsound import playsound
+import pywhatkit as kit
+
+# ---------------- SETTINGS ----------------
+MODEL_PATH = "best.pt"
+ALARM_PATH = "alarm.mp3"
+PHONE_NUMBER = "+91xxxxxxxxxx"
+MESSAGE = "⚠️ Snake detected! Please check the area immediately."
+ALERT_INTERVAL = 300
+CONF_THRESHOLD = 0.4      # temporarily lower for testing
+FRAME_THRESHOLD = 3          # consecutive frames
+ignored_labels = ["person", "chair", "dog"]
+# ------------------------------------------
+
+# Load model
+if not os.path.exists(MODEL_PATH):
+    print(f"❌ Model not found: {MODEL_PATH}")
+    exit()
+
+model = YOLO(MODEL_PATH)
+print("✅ Model loaded!")
+SNAKE_LABELS = [name.lower() for name in model.names.values()]
+print("🐍 Snake labels:", SNAKE_LABELS)
+
+last_alert_time = 0
+snake_count = 0  # consecutive frame counter
+
+def play_alarm():
+    try:
+        playsound(ALARM_PATH)
+        print("🚨 Alarm triggered!")
+    except Exception as e:
+        print("⚠️ Alarm error:", e)
+
+def send_whatsapp_alert():
+    global last_alert_time
+    current_time = time.time()
+    if current_time - last_alert_time >= ALERT_INTERVAL:
+        try:
+            hour = time.localtime().tm_hour
+            minute = (time.localtime().tm_min + 1) % 60
+            kit.sendwhatmsg(PHONE_NUMBER, MESSAGE, hour, minute,
+                            wait_time=10, tab_close=True)
+            last_alert_time = current_time
+            print("✅ WhatsApp alert sent!")
+        except Exception as e:
+            print("⚠️ WhatsApp alert failed:", e)
+    else:
+        print("⏳ Alert skipped (interval not reached)")
+
+# ---------------- WEBCAM ----------------
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("❌ Cannot access webcam.")
+    exit()
+
+print("📹 Starting real-time detection... Press 'q' to stop.")
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        print("⚠️ Frame read failed.")
+        break
+
+    # Resize frame to 640x640 (YOLO input size)
+    frame_resized = cv2.resize(frame, (640, 640))
+    frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+
+    detected_snake_frame = False
+
+    # YOLO prediction
+    results = model.predict(source=frame_rgb, imgsz=640, conf=CONF_THRESHOLD, verbose=False)
+
+    # Draw boxes
+    frame_drawn = results[0].plot()
+
+    # Loop through detections
+    for result in results:
+        for box in result.boxes:
+            label = model.names[int(box.cls)].lower()
+            conf = float(box.conf)
+
+            # Skip ignored labels
+            if label in ignored_labels:
+                continue
+
+            # Check snake
+            if label in SNAKE_LABELS and conf > CONF_THRESHOLD:
+                detected_snake_frame = True
+                print(f"⚠️ Snake detected ({conf:.2f})")
+
+    # Consecutive frame logic
+    if detected_snake_frame:
+        snake_count += 1
+    else:
+        snake_count = 0
+
+    if snake_count >= FRAME_THRESHOLD:
+        threading.Thread(target=play_alarm, daemon=True).start()
+        threading.Thread(target=send_whatsapp_alert, daemon=True).start()
+        snake_count = 0  # reset after alert
+
+    # Show feed in proper color
+    cv2.imshow("🐍 Snake Detection", cv2.cvtColor(frame_drawn, cv2.COLOR_RGB2BGR))
+
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        print("🛑 Detection stopped.")
+        break
+
+cap.release()
+cv2.destroyAllWindows()
